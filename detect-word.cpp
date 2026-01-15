@@ -75,6 +75,24 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // Initialize VAD context
+    struct whisper_vad_context_params vparams = whisper_vad_default_context_params();
+    struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params("/home/daniel/archivos/ggml-silero-v6.2.0.bin", vparams);
+    if (vctx == nullptr) {
+        fprintf(stderr, "Error: Failed to initialize VAD context.\n");
+        return 1;
+    }
+
+    // Detect speech segments
+    struct whisper_vad_params vad_params = whisper_vad_default_params();
+    struct whisper_vad_segments * segments = whisper_vad_segments_from_samples(vctx, vad_params, pcmf32.data(), pcmf32.size());
+    if (segments == nullptr) {
+        fprintf(stderr, "Error: Failed to detect speech segments.\n");
+        return 1;
+    }
+
+    int n_vad_segments = whisper_vad_segments_n_segments(segments);
+
     // Initialize whisper context
     struct whisper_context_params cparams = whisper_context_default_params();
     struct whisper_context * ctx = whisper_init_from_file_with_params("/home/daniel/archivos/ggml-large-v3-turbo-q5_0.bin", cparams);
@@ -83,7 +101,6 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Run inference
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
     params.beam_search.beam_size = 5;
     params.print_progress = false;
@@ -99,30 +116,61 @@ int main(int argc, char ** argv) {
     params.suppress_blank = true;
     params.suppress_nst = true;
 
-    if (whisper_full(ctx, params, pcmf32.data(), pcmf32.size()) != 0) {
-        fprintf(stderr, "Error: Failed to process audio.\n");
-        return 1;
-    }
-
     float final_start_seconds = -1.0f;
 
-    const int n_segments = whisper_full_n_segments(ctx);
-    for (int i = 0; i < n_segments; ++i) {
-        const int n_tokens = whisper_full_n_tokens(ctx, i);
-        for (int j = 0; j < n_tokens; ++j) {
-            const char * token_text = whisper_full_get_token_text(ctx, i, j);
-            if (token_text == nullptr) continue;
+    for (int i = 0; i < n_vad_segments; ++i) {
+        float t0 = whisper_vad_segments_get_segment_t0(segments, i) * 0.01f;
+        float t1 = whisper_vad_segments_get_segment_t1(segments, i) * 0.01f;
+        int sample_start = (int)(t0 * 16000);
+        int sample_count = (int)((t1 - t0) * 16000);
+
+        // Ensure we don't go out of bounds
+        if (sample_start >= pcmf32.size()) continue;
+        if (sample_start + sample_count > pcmf32.size()) {
+            sample_count = pcmf32.size() - sample_start;
+        }
+        if (sample_count <= 0) continue;
+
+        if (whisper_full(ctx, params, pcmf32.data() + sample_start, sample_count) != 0) {
+            fprintf(stderr, "Error: Failed to process segment %d.\n", i);
+            continue;
+        }
+
+        const int n_whisper_segments = whisper_full_n_segments(ctx);
+        for (int j = 0; j < n_whisper_segments; ++j) {
+            std::string accumulated_cleaned = "";
+            std::vector<int> char_to_token;
+            const int n_tokens = whisper_full_n_tokens(ctx, j);
             
-            std::string word = clean_word(token_text);
-            if (word == target_word) {
-                whisper_token_data token_data = whisper_full_get_token_data(ctx, i, j);
-                final_start_seconds = token_data.t0 * 0.01f; // t0 is in centiseconds
+            for (int k = 0; k < n_tokens; ++k) {
+                whisper_token token_id = whisper_full_get_token_id(ctx, j, k);
+                if (token_id >= whisper_token_beg(ctx)) continue;
+
+                const char * token_text = whisper_full_get_token_text(ctx, j, k);
+                if (token_text == nullptr) continue;
+                
+                std::string cleaned = clean_word(token_text);
+                for (size_t l = 0; l < cleaned.length(); ++l) {
+                    char_to_token.push_back(k);
+                }
+                accumulated_cleaned += cleaned;
+            }
+
+            size_t pos = accumulated_cleaned.find(target_word);
+            if (pos != std::string::npos) {
+                int token_index = char_to_token[pos];
+                whisper_token_data token_data = whisper_full_get_token_data(ctx, j, token_index);
+                
+                // token_data.t0 is relative to the start of this VAD segment
+                final_start_seconds = t0 + (token_data.t0 * 0.01f);
                 break;
             }
         }
         if (final_start_seconds >= 0) break;
     }
 
+    whisper_vad_free_segments(segments);
+    whisper_vad_free(vctx);
     whisper_free(ctx);
     remove(temp_wav.c_str());
 
