@@ -11,15 +11,28 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 std::string clean_word(const std::string & word) {
-    std::string cleaned = "";
-    for (char c : word) {
+    std::string cleaned;
+    cleaned.reserve(word.length());
+    for (unsigned char c : word) {
         if (std::isalnum(c)) {
-            cleaned += std::tolower(c);
+            cleaned += (char)std::tolower(c);
         }
     }
     return cleaned;
+}
+
+void append_cleaned_word(const char * token_text, std::string & accumulated, std::vector<int> & char_to_token, int token_index) {
+    if (!token_text) return;
+    for (size_t i = 0; token_text[i] != '\0'; ++i) {
+        unsigned char c = (unsigned char)token_text[i];
+        if (std::isalnum(c)) {
+            accumulated += (char)std::tolower(c);
+            char_to_token.push_back(token_index);
+        }
+    }
 }
 
 void whisper_log_callback(ggml_log_level level, const char * text, void * user_data) {
@@ -38,18 +51,30 @@ int main(int argc, char ** argv) {
     av_log_set_level(AV_LOG_ERROR);
 
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <audio_file> <word> [--output <output_file>]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <audio_file> <word> [--output <output_file>] [--model <path>] [--vad-model <path>] [--threads <n>] [--beam-size <n>]\n", argv[0]);
         return 1;
     }
 
     std::string audio_file = argv[1];
     std::string target_word = clean_word(argv[2]);
     std::string output_file = "/tmp/trim-output.opus";
+    std::string model_path = "/home/daniel/archivos/ggml-large-v3-turbo-q5_0.bin";
+    std::string vad_model_path = "/home/daniel/archivos/ggml-silero-v6.2.0.bin";
+    int n_threads = std::thread::hardware_concurrency();
+    int beam_size = 5;
 
     for (int i = 3; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--output" && i + 1 < argc) {
             output_file = argv[++i];
+        } else if (arg == "--model" && i + 1 < argc) {
+            model_path = argv[++i];
+        } else if (arg == "--vad-model" && i + 1 < argc) {
+            vad_model_path = argv[++i];
+        } else if (arg == "--threads" && i + 1 < argc) {
+            n_threads = std::stoi(argv[++i]);
+        } else if (arg == "--beam-size" && i + 1 < argc) {
+            beam_size = std::stoi(argv[++i]);
         }
     }
 
@@ -63,9 +88,9 @@ int main(int argc, char ** argv) {
 
     // Initialize VAD context
     struct whisper_vad_context_params vparams = whisper_vad_default_context_params();
-    struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params("/home/daniel/archivos/ggml-silero-v6.2.0.bin", vparams);
+    struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params(vad_model_path.c_str(), vparams);
     if (vctx == nullptr) {
-        fprintf(stderr, "Error: Failed to initialize VAD context.\n");
+        fprintf(stderr, "Error: Failed to initialize VAD context from %s\n", vad_model_path.c_str());
         return 1;
     }
 
@@ -74,6 +99,7 @@ int main(int argc, char ** argv) {
     struct whisper_vad_segments * segments = whisper_vad_segments_from_samples(vctx, vad_params, pcmf32.data(), pcmf32.size());
     if (segments == nullptr) {
         fprintf(stderr, "Error: Failed to detect speech segments.\n");
+        whisper_vad_free(vctx);
         return 1;
     }
 
@@ -81,21 +107,23 @@ int main(int argc, char ** argv) {
 
     // Initialize whisper context
     struct whisper_context_params cparams = whisper_context_default_params();
-    struct whisper_context * ctx = whisper_init_from_file_with_params("/home/daniel/archivos/ggml-large-v3-turbo-q5_0.bin", cparams);
+    struct whisper_context * ctx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
     if (ctx == nullptr) {
-        fprintf(stderr, "Error: Failed to initialize whisper context.\n");
+        fprintf(stderr, "Error: Failed to initialize whisper context from %s\n", model_path.c_str());
+        whisper_vad_free_segments(segments);
+        whisper_vad_free(vctx);
         return 1;
     }
 
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
-    params.beam_search.beam_size = 5;
+    params.beam_search.beam_size = beam_size;
     params.print_progress = false;
     params.print_special = false;
     params.print_realtime = false;
     params.print_timestamps = false;
     params.translate = false;
     params.language = "auto";
-    params.n_threads = 8;
+    params.n_threads = n_threads;
     params.token_timestamps = true;
     params.no_context = true;
     params.single_segment = false;
@@ -104,16 +132,20 @@ int main(int argc, char ** argv) {
 
     float final_start_seconds = -1.0f;
 
+    std::string accumulated_cleaned;
+    std::vector<int> char_to_token;
+    accumulated_cleaned.reserve(256);
+    char_to_token.reserve(256);
+
     for (int i = 0; i < n_vad_segments; ++i) {
         float t0 = whisper_vad_segments_get_segment_t0(segments, i) * 0.01f;
         float t1 = whisper_vad_segments_get_segment_t1(segments, i) * 0.01f;
         int sample_start = (int)(t0 * 16000);
         int sample_count = (int)((t1 - t0) * 16000);
 
-        // Ensure we don't go out of bounds
-        if (sample_start >= pcmf32.size()) continue;
-        if (sample_start + sample_count > pcmf32.size()) {
-            sample_count = pcmf32.size() - sample_start;
+        if (sample_start >= (int)pcmf32.size()) continue;
+        if (sample_start + sample_count > (int)pcmf32.size()) {
+            sample_count = (int)pcmf32.size() - sample_start;
         }
         if (sample_count <= 0) continue;
 
@@ -124,8 +156,8 @@ int main(int argc, char ** argv) {
 
         const int n_whisper_segments = whisper_full_n_segments(ctx);
         for (int j = 0; j < n_whisper_segments; ++j) {
-            std::string accumulated_cleaned = "";
-            std::vector<int> char_to_token;
+            accumulated_cleaned.clear();
+            char_to_token.clear();
             const int n_tokens = whisper_full_n_tokens(ctx, j);
             
             for (int k = 0; k < n_tokens; ++k) {
@@ -133,13 +165,7 @@ int main(int argc, char ** argv) {
                 if (token_id >= whisper_token_beg(ctx)) continue;
 
                 const char * token_text = whisper_full_get_token_text(ctx, j, k);
-                if (token_text == nullptr) continue;
-                
-                std::string cleaned = clean_word(token_text);
-                for (size_t l = 0; l < cleaned.length(); ++l) {
-                    char_to_token.push_back(k);
-                }
-                accumulated_cleaned += cleaned;
+                append_cleaned_word(token_text, accumulated_cleaned, char_to_token, k);
             }
 
             size_t pos = accumulated_cleaned.find(target_word);
@@ -147,7 +173,6 @@ int main(int argc, char ** argv) {
                 int token_index = char_to_token[pos];
                 whisper_token_data token_data = whisper_full_get_token_data(ctx, j, token_index);
                 
-                // token_data.t0 is relative to the start of this VAD segment
                 final_start_seconds = t0 + (token_data.t0 * 0.01f);
                 break;
             }
@@ -160,13 +185,12 @@ int main(int argc, char ** argv) {
     whisper_free(ctx);
 
     if (final_start_seconds < 0) {
-        fprintf(stderr, "Target word '%s' not detected. Not creating an output file.\n", argv[2]);
+        fprintf(stderr, "Target word '%s' not detected. Not creating an output file.\n", target_word.c_str());
         return 0;
     }
 
-    fprintf(stderr, "Detected target word '%s' at %.3f seconds.\n", argv[2], final_start_seconds);
+    fprintf(stderr, "Detected target word '%s' at %.3f seconds.\n", target_word.c_str(), final_start_seconds);
 
-    // Trim audio using ffmpeg
     std::string trim_cmd = "ffmpeg -hide_banner -loglevel error -nostdin -y -i \"" + audio_file + "\" -ss " + std::to_string(final_start_seconds) + " -c copy \"" + output_file + "\"";
     fprintf(stderr, "Trimming audio and saving to %s...\n", output_file.c_str());
     if (system(trim_cmd.c_str()) != 0) {

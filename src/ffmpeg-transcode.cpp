@@ -149,16 +149,18 @@ static int read_packet(void *opaque, u8 *buf, int buf_size)
 }
 
 static void convert_frame(struct SwrContext *swr, AVCodecContext *codec,
-			  AVFrame *frame, s16 **data, int *size, bool flush)
+			  AVFrame *frame, std::vector<s16> & data, bool flush)
 {
 	int nr_samples;
 	s64 delay;
 	u8 *buffer;
 
 	delay = swr_get_delay(swr, codec->sample_rate);
-	nr_samples = av_rescale_rnd(delay + frame->nb_samples,
+	nr_samples = av_rescale_rnd(delay + (flush ? 0 : frame->nb_samples),
 				    WAVE_SAMPLE_RATE, codec->sample_rate,
 				    AV_ROUND_UP);
+    if (nr_samples <= 0) return;
+
 	av_samples_alloc(&buffer, NULL, 1, nr_samples, AV_SAMPLE_FMT_S16, 0);
 
 	/*
@@ -169,9 +171,11 @@ static void convert_frame(struct SwrContext *swr, AVCodecContext *codec,
 				 !flush ? (const u8 **)frame->data : NULL,
 				 !flush ? frame->nb_samples : 0);
 
-    *data = (s16*)realloc(*data, (*size + nr_samples) * sizeof(s16));
-	memcpy(*data + *size, buffer, nr_samples * sizeof(s16));
-	*size += nr_samples;
+    if (nr_samples > 0) {
+        size_t old_size = data.size();
+        data.resize(old_size + nr_samples);
+        memcpy(data.data() + old_size, buffer, nr_samples * sizeof(s16));
+    }
 	av_freep(&buffer);
 }
 
@@ -185,9 +189,8 @@ static bool is_audio_stream(const AVStream *stream)
 
 // Return non zero on error, 0 on success
 // audio_buffer: input memory
-// data: decoded output audio data (wav file)
-// size: size of output data
-static int decode_audio(struct audio_buffer *audio_buf, s16 **data, int *size)
+// data: decoded output audio data
+static int decode_audio(struct audio_buffer *audio_buf, std::vector<s16> & data)
 {
     LOG("decode_audio: input size: %d\n", audio_buf->size);
 	AVFormatContext *fmt_ctx;
@@ -291,8 +294,7 @@ static int decode_audio(struct audio_buffer *audio_buf, s16 **data, int *size)
 	}
 
 	/* iterate through frames */
-	*data = NULL;
-	*size = 0;
+	data.clear();
 	while (av_read_frame(fmt_ctx, packet) >= 0) {
 		avcodec_send_packet(codec, packet);
 
@@ -300,10 +302,10 @@ static int decode_audio(struct audio_buffer *audio_buf, s16 **data, int *size)
 		if (err == AVERROR(EAGAIN))
 			continue;
 
-		convert_frame(swr, codec, frame, data, size, false);
+		convert_frame(swr, codec, frame, data, false);
 	}
 	/* Flush any remaining conversion buffers... */
-	convert_frame(swr, codec, frame, data, size, true);
+	convert_frame(swr, codec, frame, data, true);
 
 	av_packet_free(&packet);
 	av_frame_free(&frame);
@@ -337,32 +339,35 @@ int ffmpeg_decode_audio(const std::string &ifname, std::vector<uint8_t>& owav_da
     int err = map_file(ifd, &ibuf, &ibuf_size);
     if (err) {
         LOG("Couldn't map input file %s\n", ifname.c_str());
+        close(ifd);
         return err;
     }
-    LOG("Mapped input file: %s size: %d\n", ibuf, (int) ibuf_size);
+    LOG("Mapped input file size: %zu\n", ibuf_size);
     struct audio_buffer inaudio_buf;
     inaudio_buf.ptr = ibuf;
-    inaudio_buf.size = ibuf_size;
+    inaudio_buf.size = (int)ibuf_size;
 
-    s16 *odata=NULL;
-    int osize=0;
+    std::vector<s16> odata;
 
-    err = decode_audio(&inaudio_buf, &odata, &osize);
+    err = decode_audio(&inaudio_buf, odata);
     LOG("decode_audio returned %d \n", err);
+    munmap(ibuf, ibuf_size);
+    close(ifd);
+
     if (err != 0) {
         LOG("decode_audio failed\n");
         return err;
     }
-    LOG("decode_audio output size: %d\n", osize);
+    LOG("decode_audio output size: %zu\n", odata.size());
 
     wave_hdr wh;
-    const size_t outdatasize = osize * sizeof(s16);
+    const size_t outdatasize = odata.size() * sizeof(s16);
     set_wave_hdr(wh, outdatasize);
     owav_data.resize(sizeof(wave_hdr) + outdatasize);
     // header:
     memcpy(owav_data.data(), &wh, sizeof(wave_hdr));
     // the data:
-    memcpy(owav_data.data() + sizeof(wave_hdr), odata, osize* sizeof(s16));
+    memcpy(owav_data.data() + sizeof(wave_hdr), odata.data(), outdatasize);
 
     return 0;
 }

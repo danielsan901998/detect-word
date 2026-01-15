@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -O3 -Iinclude -Isrc -DWHISPER_FFMPEG
+CXXFLAGS = -O3 -march=native -Iinclude -Isrc -DWHISPER_FFMPEG
 LDFLAGS = -lwhisper -lggml -lpthread -ldl -lm -lavcodec -lavformat -lavutil -lswresample
 
 OBJ_DIR = obj
