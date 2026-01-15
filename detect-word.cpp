@@ -2,6 +2,10 @@
 #include "common.h"
 #include "common-whisper.h"
 
+extern "C" {
+#include <libavutil/log.h>
+}
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -42,7 +46,21 @@ std::string clean_word(const std::string & word) {
     return cleaned;
 }
 
+void whisper_log_callback(ggml_log_level level, const char * text, void * user_data) {
+    (void)user_data;
+    static ggml_log_level last_level = GGML_LOG_LEVEL_NONE;
+    if (level != GGML_LOG_LEVEL_CONT) {
+        last_level = level;
+    }
+    if (last_level == GGML_LOG_LEVEL_ERROR || last_level == GGML_LOG_LEVEL_WARN) {
+        fprintf(stderr, "%s", text);
+    }
+}
+
 int main(int argc, char ** argv) {
+    whisper_log_set(whisper_log_callback, nullptr);
+    av_log_set_level(AV_LOG_ERROR);
+
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <audio_file> <word> [--output <output_file>]\n", argv[0]);
         return 1;
@@ -173,7 +191,7 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "Detected target word '%s' at %.3f seconds.\n", argv[2], final_start_seconds);
 
     // Trim audio using ffmpeg
-    std::string trim_cmd = "ffmpeg -hide_banner -nostdin -y -i \"" + audio_file + "\" -ss " + std::to_string(final_start_seconds) + " -c copy \"" + output_file + "\"";
+    std::string trim_cmd = "ffmpeg -hide_banner -loglevel error -nostdin -y -i \"" + audio_file + "\" -ss " + std::to_string(final_start_seconds) + " -c copy \"" + output_file + "\"";
     fprintf(stderr, "Trimming audio and saving to %s...\n", output_file.c_str());
     if (system(trim_cmd.c_str()) != 0) {
         fprintf(stderr, "Error: Failed to trim audio using ffmpeg.\n");
