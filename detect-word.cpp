@@ -6,35 +6,11 @@ extern "C" {
 #include <libavutil/log.h>
 }
 
-#include <iostream>
 #include <vector>
 #include <string>
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <memory>
-#include <stdexcept>
 #include <cstring>
-
-// Function to execute a shell command and return the output
-std::string exec(const char* cmd) {
-    char buffer[128];
-    std::string result = "";
-    auto pipe = popen(cmd, "r");
-    if (!pipe) {
-        throw std::runtime_error("popen() failed!");
-    }
-    try {
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            result += buffer;
-        }
-    } catch (...) {
-        pclose(pipe);
-        throw;
-    }
-    pclose(pipe);
-    return result;
-}
 
 std::string clean_word(const std::string & word) {
     std::string cleaned = "";
@@ -118,7 +94,7 @@ int main(int argc, char ** argv) {
     params.print_realtime = false;
     params.print_timestamps = false;
     params.translate = false;
-    params.language = "es";
+    params.language = "auto";
     params.n_threads = 8;
     params.token_timestamps = true;
     params.no_context = true;
