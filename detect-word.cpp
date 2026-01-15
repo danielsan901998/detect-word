@@ -59,19 +59,11 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // Convert input audio to 16kHz mono WAV using ffmpeg
-    std::string temp_wav = "/tmp/whisper_temp.wav";
-    std::string ffmpeg_cmd = "ffmpeg -hide_banner -loglevel error -y -i \"" + audio_file + "\" -ar 16000 -ac 1 -c:a pcm_s16le " + temp_wav;
-    if (system(ffmpeg_cmd.c_str()) != 0) {
-        fprintf(stderr, "Error: Failed to convert audio to WAV using ffmpeg.\n");
-        return 1;
-    }
-
     // Load audio data
     std::vector<float> pcmf32;
     std::vector<std::vector<float>> pcmf32s;
-    if (!read_audio_data(temp_wav, pcmf32, pcmf32s, false)) {
-        fprintf(stderr, "Error: Failed to read audio data from %s\n", temp_wav.c_str());
+    if (!read_audio_data(audio_file, pcmf32, pcmf32s, false)) {
+        fprintf(stderr, "Error: Failed to read audio data from %s\n", audio_file.c_str());
         return 1;
     }
 
@@ -108,7 +100,7 @@ int main(int argc, char ** argv) {
     params.print_realtime = false;
     params.print_timestamps = false;
     params.translate = false;
-    params.language = "auto";
+    params.language = "es";
     params.n_threads = 8;
     params.token_timestamps = true;
     params.no_context = true;
@@ -172,7 +164,6 @@ int main(int argc, char ** argv) {
     whisper_vad_free_segments(segments);
     whisper_vad_free(vctx);
     whisper_free(ctx);
-    remove(temp_wav.c_str());
 
     if (final_start_seconds < 0) {
         fprintf(stderr, "Target word '%s' not detected. Not creating an output file.\n", argv[2]);

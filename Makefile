@@ -1,11 +1,11 @@
 CXX = g++
-CXXFLAGS = -O3 -Iinclude -Isrc
-LDFLAGS = -L/usr/local/lib -lwhisper -lggml -lpthread -ldl -lm
+CXXFLAGS = -O3 -Iinclude -Isrc -DWHISPER_FFMPEG
+LDFLAGS = -L/usr/local/lib -lwhisper -lggml -lpthread -ldl -lm -lavcodec -lavformat -lavutil -lswresample
 
 OBJ_DIR = obj
 SRC_DIR = src
 
-SRCS = detect-word.cpp $(SRC_DIR)/common.cpp $(SRC_DIR)/common-whisper.cpp
+SRCS = detect-word.cpp $(SRC_DIR)/common.cpp $(SRC_DIR)/common-whisper.cpp $(SRC_DIR)/ffmpeg-transcode.cpp
 # This transforms e.g. src/common.cpp -> obj/common.o and detect-word.cpp -> obj/detect-word.o
 OBJS = $(addprefix $(OBJ_DIR)/, $(notdir $(SRCS:.cpp=.o)))
 
