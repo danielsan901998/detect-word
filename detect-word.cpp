@@ -87,29 +87,18 @@ int main(int argc, char ** argv) {
 
     // Initialize VAD context
     struct whisper_vad_context_params vparams = whisper_vad_default_context_params();
+    vparams.n_threads = n_threads;
     struct whisper_vad_context * vctx = whisper_vad_init_from_file_with_params(vad_model_path.c_str(), vparams);
     if (vctx == nullptr) {
         fprintf(stderr, "Error: Failed to initialize VAD context from %s\n", vad_model_path.c_str());
         return 1;
     }
 
-    // Detect speech segments
-    struct whisper_vad_params vad_params = whisper_vad_default_params();
-    struct whisper_vad_segments * segments = whisper_vad_segments_from_samples(vctx, vad_params, pcmf32.data(), pcmf32.size());
-    if (segments == nullptr) {
-        fprintf(stderr, "Error: Failed to detect speech segments.\n");
-        whisper_vad_free(vctx);
-        return 1;
-    }
-
-    int n_vad_segments = whisper_vad_segments_n_segments(segments);
-
     // Initialize whisper context
     struct whisper_context_params cparams = whisper_context_default_params();
     struct whisper_context * ctx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
     if (ctx == nullptr) {
         fprintf(stderr, "Error: Failed to initialize whisper context from %s\n", model_path.c_str());
-        whisper_vad_free_segments(segments);
         whisper_vad_free(vctx);
         return 1;
     }
@@ -136,50 +125,69 @@ int main(int argc, char ** argv) {
     accumulated_cleaned.reserve(256);
     char_to_token.reserve(256);
 
-    for (int i = 0; i < n_vad_segments; ++i) {
-        float t0 = whisper_vad_segments_get_segment_t0(segments, i) * 0.01f;
-        float t1 = whisper_vad_segments_get_segment_t1(segments, i) * 0.01f;
-        int sample_start = (int)(t0 * 16000);
-        int sample_count = (int)((t1 - t0) * 16000);
+    // Detect speech segments and process in 30s chunks
+    struct whisper_vad_params vad_params = whisper_vad_default_params();
+    const int chunk_size_samples = 30 * WHISPER_SAMPLE_RATE;
 
-        if (sample_start >= (int)pcmf32.size()) continue;
-        if (sample_start + sample_count > (int)pcmf32.size()) {
-            sample_count = (int)pcmf32.size() - sample_start;
-        }
-        if (sample_count <= 0) continue;
-
-        if (whisper_full(ctx, params, pcmf32.data() + sample_start, sample_count) != 0) {
-            fprintf(stderr, "Error: Failed to process segment %d.\n", i);
+    for (int i = 0; i < (int)pcmf32.size(); i += chunk_size_samples) {
+        int n_samples = std::min(chunk_size_samples, (int)pcmf32.size() - i);
+        struct whisper_vad_segments * segments = whisper_vad_segments_from_samples(vctx, vad_params, pcmf32.data() + i, n_samples);
+        if (segments == nullptr) {
             continue;
         }
 
-        const int n_whisper_segments = whisper_full_n_segments(ctx);
-        for (int j = 0; j < n_whisper_segments; ++j) {
-            accumulated_cleaned.clear();
-            char_to_token.clear();
-            const int n_tokens = whisper_full_n_tokens(ctx, j);
+        int n_vad_segments = whisper_vad_segments_n_segments(segments);
+        for (int j = 0; j < n_vad_segments; ++j) {
+            float t0_local = whisper_vad_segments_get_segment_t0(segments, j) * 0.01f;
+            float t1_local = whisper_vad_segments_get_segment_t1(segments, j) * 0.01f;
             
-            for (int k = 0; k < n_tokens; ++k) {
-                whisper_token token_id = whisper_full_get_token_id(ctx, j, k);
-                if (token_id >= whisper_token_beg(ctx)) continue;
+            float t0 = (float)i / (float)WHISPER_SAMPLE_RATE + t0_local;
+            float t1 = (float)i / (float)WHISPER_SAMPLE_RATE + t1_local;
 
-                const char * token_text = whisper_full_get_token_text(ctx, j, k);
-                append_cleaned_word(token_text, accumulated_cleaned, char_to_token, k);
+            int sample_start = (int)(t0 * WHISPER_SAMPLE_RATE);
+            int sample_count = (int)((t1 - t0) * WHISPER_SAMPLE_RATE);
+
+            if (sample_start >= (int)pcmf32.size()) continue;
+            if (sample_start + sample_count > (int)pcmf32.size()) {
+                sample_count = (int)pcmf32.size() - sample_start;
+            }
+            if (sample_count <= 0) continue;
+
+            if (whisper_full(ctx, params, pcmf32.data() + sample_start, sample_count) != 0) {
+                fprintf(stderr, "Error: Failed to process segment.\n");
+                continue;
             }
 
-            size_t pos = accumulated_cleaned.find(target_word);
-            if (pos != std::string::npos) {
-                int token_index = char_to_token[pos];
-                whisper_token_data token_data = whisper_full_get_token_data(ctx, j, token_index);
+            const int n_whisper_segments = whisper_full_n_segments(ctx);
+            for (int k = 0; k < n_whisper_segments; ++k) {
+                accumulated_cleaned.clear();
+                char_to_token.clear();
+                const int n_tokens = whisper_full_n_tokens(ctx, k);
                 
-                final_start_seconds = t0 + (token_data.t0 * 0.01f);
-                break;
+                for (int l = 0; l < n_tokens; ++l) {
+                    whisper_token token_id = whisper_full_get_token_id(ctx, k, l);
+                    if (token_id >= whisper_token_beg(ctx)) continue;
+
+                    const char * token_text = whisper_full_get_token_text(ctx, k, l);
+                    append_cleaned_word(token_text, accumulated_cleaned, char_to_token, l);
+                }
+
+                size_t pos = accumulated_cleaned.find(target_word);
+                if (pos != std::string::npos) {
+                    int token_index = char_to_token[pos];
+                    whisper_token_data token_data = whisper_full_get_token_data(ctx, k, token_index);
+                    
+                    final_start_seconds = t0 + (token_data.t0 * 0.01f);
+                    break;
+                }
             }
+            if (final_start_seconds >= 0) break;
         }
+
+        whisper_vad_free_segments(segments);
         if (final_start_seconds >= 0) break;
     }
 
-    whisper_vad_free_segments(segments);
     whisper_vad_free(vctx);
     whisper_free(ctx);
 
