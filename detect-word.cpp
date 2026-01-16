@@ -1,5 +1,4 @@
 #include "whisper.h"
-#include "common.h"
 #include "common-whisper.h"
 
 extern "C" {
