@@ -193,7 +193,7 @@ int main(int argc, char ** argv) {
 
     if (final_start_seconds < 0) {
         fprintf(stderr, "Target word '%s' not detected. Not creating an output file.\n", target_word.c_str());
-        return 0;
+        return 1;
     }
 
     fprintf(stderr, "Detected target word '%s' at %.3f seconds.\n", target_word.c_str(), final_start_seconds);
