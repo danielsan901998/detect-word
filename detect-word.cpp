@@ -12,6 +12,10 @@ extern "C" {
 #include <cstring>
 #include <thread>
 
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 std::string clean_word(const std::string & word) {
     std::string cleaned;
     cleaned.reserve(word.length());
@@ -200,9 +204,31 @@ int main(int argc, char ** argv) {
 
     std::string trim_cmd = "ffmpeg -hide_banner -loglevel error -nostdin -y -i \"" + audio_file + "\" -ss " + std::to_string(final_start_seconds) + " -c copy \"" + output_file + "\"";
     fprintf(stderr, "Trimming audio and saving to %s...\n", output_file.c_str());
-    if (system(trim_cmd.c_str()) != 0) {
-        fprintf(stderr, "Error: Failed to trim audio using ffmpeg.\n");
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "Error: Failed to fork for ffmpeg.\n");
         return 1;
+    } else if (pid == 0) {
+        // Child process - direct ffmpeg call
+        const char * cargs[] = {
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-nostdin", "-y", "-i",
+            audio_file.c_str(),
+            "-ss", std::to_string(final_start_seconds).c_str(),
+            "-c", "copy",
+            output_file.c_str(),
+            nullptr
+        };
+        execvp(cargs[0], (char * const *)cargs);
+        _exit(1);
+    } else {
+        // Parent process
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "Error: Failed to trim audio using ffmpeg.\n");
+            return 1;
+        }
     }
 
     fprintf(stderr, "Successfully created %s.\n", output_file.c_str());
