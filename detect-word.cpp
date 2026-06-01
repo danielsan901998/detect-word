@@ -202,7 +202,20 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "Detected target word '%s' at %.3f seconds.\n", target_word.c_str(), final_start_seconds);
 
-    std::string trim_cmd = "ffmpeg -hide_banner -loglevel error -nostdin -y -i \"" + audio_file + "\" -ss " + std::to_string(final_start_seconds) + " -c copy \"" + output_file + "\"";
+    // Escape quotes in paths for safe shell/command-line usage
+    auto escape_path = [](const std::string & p) -> std::string {
+        std::string escaped;
+        escaped.reserve(p.length() + 2);
+        for (char c : p) {
+            if (c == '\"' || c == '\'') {
+                escaped += "\\" + std::string(1, c);
+            }
+            escaped += c;
+        }
+        return escaped;
+    };
+
+    std::string trim_cmd = "ffmpeg -hide_banner -loglevel error -nostdin -y -i \"" + escape_path(audio_file) + "\" -ss " + std::to_string(final_start_seconds) + " -c copy \"" + output_file + "\"";
     fprintf(stderr, "Trimming audio and saving to %s...\n", output_file.c_str());
     pid_t pid = fork();
     if (pid < 0) {
