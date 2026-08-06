@@ -20,6 +20,7 @@ find_package(Threads REQUIRED)
 
 add_executable(detect-word
     detect-word.cpp
+    src/command.cpp
     src/common.cpp
     src/common-whisper.cpp
     src/ffmpeg-transcode.cpp
